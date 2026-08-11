@@ -7,6 +7,7 @@ venv/
 
 # FileCompare runtime data
 FileCompare/Data/**/*.json
+FileCompare/Data/**/*.csv
 FileCompare/Data/dlt/
 !FileCompare/Data/.gitkeep
 
