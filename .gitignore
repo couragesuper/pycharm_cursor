@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# FileCompare runtime data
+FileCompare/Data/**/*.json
+FileCompare/Data/dlt/
+!FileCompare/Data/.gitkeep
+
+# IDE / OS
+.idea/
+.vscode/
+*.user
+Thumbs.db
+Desktop.ini
+
+# Build / Dist outputs
+FileCompare/Dist/*.exe
+FileCompare/Dist/build/
+FileCompare/Dist/dist/
+FileCompare/Dist/*.spec
