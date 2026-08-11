@@ -7,10 +7,15 @@ DLT Viewer에서 해당 .dlt 파일을 Open 하면 로그를 확인할 수 있�
 from __future__ import annotations
 
 import struct
+import sys
 import threading
 import time
 from enum import IntEnum
 from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 
 
 class DltLogLevel(IntEnum):
@@ -101,3 +106,20 @@ class FCMP_Dlt:
         standard = bytes([0x21, self._msg_count]) + struct.pack(">H", length)
 
         return storage + standard + ext + payload
+
+
+if __name__ == "__main__":
+    # --- 디버깅용 샘플 변수 (여기 값을 바꿔서 직접 실행) ---
+    SAMPLE_LOG_DIR = _ROOT / "Data" / "dlt"
+    SAMPLE_CONTEXT = "TEST"
+    SAMPLE_MESSAGE = "FCMP_Dlt debug main hello"
+    # -------------------------------------------------------
+
+    # 단독 실행 시 새 세션 파일 생성
+    FCMP_Dlt._instance = None
+    dlt = FCMP_Dlt.instance(SAMPLE_LOG_DIR)
+    dlt.info(SAMPLE_CONTEXT, SAMPLE_MESSAGE)
+    dlt.debug(SAMPLE_CONTEXT, "debug line")
+    dlt.warn(SAMPLE_CONTEXT, "warn line")
+    print(f"[done] dlt file: {dlt.log_path}")
+    print(f"[done] size: {dlt.log_path.stat().st_size} bytes")

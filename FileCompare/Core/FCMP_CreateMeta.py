@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+# 파일 직접 실행/디버깅용 (PyCharm Working Directory = FileCompare 권장)
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 from Core.FCMP_Dlt import FCMP_Dlt
 
-# progress(count, current_folder)
-ProgressCallback = Callable[[int, str], None]
+# progress(videos_found, dirs_scanned, current_folder)
+ProgressCallback = Callable[[int, int, str], None]
 
 # 동영상만 수집
 VIDEO_EXTENSIONS = {
@@ -43,7 +49,6 @@ VIDEO_EXTENSIONS = {
 
 # Windows 숨김/시스템 속성
 _FILE_ATTRIBUTE_HIDDEN = 0x2
-_FILE_ATTRIBUTE_SYSTEM = 0x4
 
 _SKIP_DIR_NAMES = {
     "$recycle.bin",
@@ -77,12 +82,12 @@ class FCMP_CreateMeta:
         root = str(target_path)
         self.dlt.info("META", f"scan start (video only, no hidden): {root}")
         if progress:
-            progress(0, root)
+            progress(0, 0, root)
 
         files: list[dict[str, Any]] = []
         count = 0
-        last_report = 0
         dirs_seen = 0
+        last_report_at = 0.0
 
         for dirpath, dirnames, filenames in os.walk(
             root,
@@ -98,8 +103,11 @@ class FCMP_CreateMeta:
             ]
 
             dirs_seen += 1
-            if progress and dirs_seen % 5 == 1:
-                progress(count, dirpath)
+            now = time.perf_counter()
+            # UI 갱신: 폴더마다(단 0.2초 스로틀) — 동영상 0개여도 폴더스캔 수가 오름
+            if progress and (now - last_report_at) >= 0.2:
+                progress(count, dirs_seen, dirpath)
+                last_report_at = now
 
             for name in filenames:
                 ext = os.path.splitext(name)[1].lower()
@@ -123,18 +131,21 @@ class FCMP_CreateMeta:
                     }
                 )
                 count += 1
-                if progress and (count - last_report) >= 50:
-                    progress(count, dirpath)
-                    last_report = count
-                    if count % 500 == 0:
+                if progress and (time.perf_counter() - last_report_at) >= 0.2:
+                    progress(count, dirs_seen, dirpath)
+                    last_report_at = time.perf_counter()
+                    if count % 200 == 0:
                         self.dlt.debug(
                             "META",
-                            f"scan progress: {count} videos @ {dirpath}",
+                            f"scan progress: {count} videos, {dirs_seen} dirs @ {dirpath}",
                         )
 
         if progress:
-            progress(count, root)
-        self.dlt.info("META", f"scan done: {count} video files")
+            progress(count, dirs_seen, root)
+        self.dlt.info(
+            "META",
+            f"scan done: {count} video files, {dirs_seen} dirs",
+        )
         return files
 
     def create(
@@ -188,28 +199,13 @@ class FCMP_CreateMeta:
     def _is_hidden(self, full_path: str, name: str) -> bool:
         if name.startswith("."):
             return True
+        # Windows: HIDDEN 속성만 제외 (SYSTEM 단독은 일반 폴더에 흔해 제외하지 않음)
         try:
             attrs = os.stat(full_path).st_file_attributes  # type: ignore[attr-defined]
-            if attrs & (_FILE_ATTRIBUTE_HIDDEN | _FILE_ATTRIBUTE_SYSTEM):
+            if attrs & _FILE_ATTRIBUTE_HIDDEN:
                 return True
         except (AttributeError, OSError):
-            # non-Windows or inaccessible: fall back to name-only rule
             pass
-        # Windows 전용 속성 재확인
-        if os.name == "nt":
-            try:
-                import ctypes
-
-                GetFileAttributesW = ctypes.windll.kernel32.GetFileAttributesW
-                GetFileAttributesW.argtypes = [ctypes.c_wchar_p]
-                GetFileAttributesW.restype = ctypes.c_uint32
-                attrs = GetFileAttributesW(full_path)
-                if attrs == 0xFFFFFFFF:
-                    return False
-                if attrs & (_FILE_ATTRIBUTE_HIDDEN | _FILE_ATTRIBUTE_SYSTEM):
-                    return True
-            except (AttributeError, OSError, ValueError):
-                return False
         return False
 
     def _on_walk_error(self, err: OSError) -> None:
@@ -242,3 +238,19 @@ class FCMP_CreateMeta:
                 continue
             results.append(path)
         return results
+
+
+if __name__ == "__main__":
+    # --- 디버깅용 샘플 변수 (여기 값을 바꿔서 직접 실행) ---
+    SAMPLE_TARGET = r"E:/"  # 스캔할 폴더/드라이브
+    SAMPLE_NICKNAME = "debug_create"  # 결과: Data/fcmp_debug_create.json
+    SAMPLE_DATA_DIR = _ROOT / "Data"  # None 이면 기본 Data
+    # -------------------------------------------------------
+
+    def _on_progress(videos: int, dirs: int, folder: str) -> None:
+        print(f"[progress] videos={videos} dirs={dirs} folder={folder}")
+
+    creator = FCMP_CreateMeta(SAMPLE_DATA_DIR)
+    out = creator.create(SAMPLE_TARGET, SAMPLE_NICKNAME, progress=_on_progress)
+    print(f"[done] path={out}")
+    print(f"[done] elapsed={creator.last_elapsed_sec:.3f}s")

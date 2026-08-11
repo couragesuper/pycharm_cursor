@@ -30,7 +30,8 @@ from Core.FCMP_Dlt import FCMP_Dlt
 class _CreateMetaWorker(QObject):
     finished = Signal(str, float)
     failed = Signal(str)
-    progress = Signal(int, str)  # count, current_folder
+    # videos_found, dirs_scanned, current_folder
+    progress = Signal(int, int, str)
 
     def __init__(self, target: str, nickname: str, data_dir: Path) -> None:
         super().__init__()
@@ -45,7 +46,9 @@ class _CreateMetaWorker(QObject):
             out = creator.create(
                 self._target,
                 self._nickname,
-                progress=lambda n, folder: self.progress.emit(n, folder),
+                progress=lambda videos, dirs, folder: self.progress.emit(
+                    videos, dirs, folder
+                ),
             )
             self.finished.emit(str(out), creator.last_elapsed_sec)
         except Exception as exc:  # noqa: BLE001 - UI에 메시지 전달
@@ -67,7 +70,9 @@ class MainWindow(QMainWindow):
         self._comparer = FCMP_CompareMeta(self._data_dir)
         self._selected_folder = ""
         self._worker_thread: QThread | None = None
+        self._worker: _CreateMetaWorker | None = None
         self._op_started_at: float | None = None
+        self._last_compare_result: dict | None = None
 
         self._tick = QTimer(self)
         self._tick.setInterval(100)
@@ -112,8 +117,8 @@ class MainWindow(QMainWindow):
         sep.setStyleSheet("background-color: #888;")
         layout.addWidget(sep)
 
-        # --- Meta 목록 / Compare ---
-        layout.addWidget(QLabel("생성된 MetaData (fcmp_*.json) — Ctrl로 두 개 선택"))
+        # --- Meta 목록 / Compare / 삭제 ---
+        layout.addWidget(QLabel("생성된 MetaData (fcmp_*.json) — 선택 후 Compare(2개) 또는 삭제"))
 
         list_row = QHBoxLayout()
         self.meta_list = QListWidget()
@@ -125,15 +130,31 @@ class MainWindow(QMainWindow):
         refresh_btn.clicked.connect(self.refresh_meta_list)
         compare_btn = QPushButton("Compare")
         compare_btn.clicked.connect(self._on_compare)
+        delete_btn = QPushButton("삭제")
+        delete_btn.clicked.connect(self._on_delete_meta)
         side.addWidget(refresh_btn)
         side.addWidget(compare_btn)
+        side.addWidget(delete_btn)
         side.addStretch(1)
         list_row.addLayout(side)
         layout.addLayout(list_row)
 
-        layout.addWidget(QLabel("Compare 결과"))
+        compare_header = QHBoxLayout()
+        compare_header.addWidget(QLabel("Compare 결과 (LeftOnly / 파일명 / 위치 / 사이즈)"))
+        compare_header.addStretch(1)
+        save_csv_btn = QPushButton("CSV 저장")
+        save_csv_btn.clicked.connect(self._on_save_compare_csv)
+        compare_header.addWidget(save_csv_btn)
+        layout.addLayout(compare_header)
+
         self.compare_list = QListWidget()
         layout.addWidget(self.compare_list, stretch=1)
+
+        # --- Separator (Status 위) ---
+        sep_status = QWidget()
+        sep_status.setFixedHeight(1)
+        sep_status.setStyleSheet("background-color: #888;")
+        layout.addWidget(sep_status)
 
         # --- Status (하단: 폴더/파일수 / 실행 시간 / 완료) ---
         self.status_progress = QLabel("처리: -")
@@ -168,13 +189,21 @@ class MainWindow(QMainWindow):
         else:
             self.status_done.setText("완료: 진행 중")
 
-    def _set_progress(self, count: int | None, folder: str | None) -> None:
-        if count is None and folder is None:
+    def _set_progress(
+        self,
+        videos: int | None,
+        folder: str | None,
+        dirs: int | None = None,
+    ) -> None:
+        if videos is None and folder is None:
             self.status_progress.setText("처리: -")
             return
+        video_text = "0" if videos is None else f"{videos:,}"
+        dirs_text = "-" if dirs is None else f"{dirs:,}"
         folder_text = folder or "-"
-        count_text = "0" if count is None else f"{count:,}"
-        self.status_progress.setText(f"처리: {count_text} files | 폴더: {folder_text}")
+        self.status_progress.setText(
+            f"동영상: {video_text} | 폴더스캔: {dirs_text} | 현재: {folder_text}"
+        )
 
     def _start_timing(self, state: str) -> None:
         self._op_started_at = time.perf_counter()
@@ -223,7 +252,7 @@ class MainWindow(QMainWindow):
 
         self.dlt.info("MAIN", f"create requested nick={nickname}")
         self._start_timing("메타데이터 생성")
-        self._set_progress(0, folder)
+        self._set_progress(0, folder, 0)
         self.statusBar().showMessage(f"메타 생성 중... | {folder}")
 
         thread = QThread(self)
@@ -237,15 +266,20 @@ class MainWindow(QMainWindow):
         worker.failed.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(self._clear_worker)
+        # QThread 사용 시 worker 참조를 유지해야 GC로 작업이 끊기지 않음
+        self._worker = worker
         self._worker_thread = thread
         thread.start()
 
-    def _on_create_progress(self, count: int, folder: str) -> None:
-        self._set_progress(count, folder)
-        self.statusBar().showMessage(f"스캔 중... {count:,} files | {folder}")
+    def _on_create_progress(self, videos: int, dirs: int, folder: str) -> None:
+        self._set_progress(videos, folder, dirs)
+        self.statusBar().showMessage(
+            f"스캔 중... 동영상 {videos:,} / 폴더 {dirs:,} | {folder}"
+        )
 
     def _clear_worker(self) -> None:
         self._worker_thread = None
+        self._worker = None
 
     def _on_create_finished(self, out_path: str, elapsed: float) -> None:
         self._finish_timing("메타데이터 생성", elapsed, True)
@@ -268,6 +302,48 @@ class MainWindow(QMainWindow):
         self.dlt.error("MAIN", f"create failed: {message}")
         QMessageBox.critical(self, "오류", message)
 
+    def _on_delete_meta(self) -> None:
+        selected = self.meta_list.selectedItems()
+        if not selected:
+            QMessageBox.warning(self, "선택 오류", "삭제할 MetaData를 선택하세요.")
+            return
+
+        names = [item.text() for item in selected]
+        preview = "\n".join(names[:10])
+        if len(names) > 10:
+            preview += f"\n... 외 {len(names) - 10}개"
+
+        answer = QMessageBox.question(
+            self,
+            "메타데이터 삭제",
+            f"선택한 {len(names)}개 파일을 삭제할까요?\n\n{preview}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+
+        deleted = 0
+        errors: list[str] = []
+        for item in selected:
+            path = Path(item.data(Qt.ItemDataRole.UserRole))
+            try:
+                path.unlink(missing_ok=False)
+                deleted += 1
+                self.dlt.info("MAIN", f"meta deleted: {path.name}")
+            except OSError as exc:
+                errors.append(f"{path.name}: {exc}")
+                self.dlt.error("MAIN", f"meta delete failed: {path.name} {exc}")
+
+        self.refresh_meta_list()
+        self.statusBar().showMessage(f"메타 삭제: {deleted}개 완료")
+        if errors:
+            QMessageBox.warning(
+                self,
+                "일부 삭제 실패",
+                f"{deleted}개 삭제됨.\n실패:\n" + "\n".join(errors),
+            )
+
     def _on_compare(self) -> None:
         selected = self.meta_list.selectedItems()
         if len(selected) != 2:
@@ -280,7 +356,7 @@ class MainWindow(QMainWindow):
         self._start_timing("Compare")
 
         try:
-            result = self._comparer.compare(left, right, save=True)
+            result = self._comparer.compare(left, right, save=False)
         except Exception as exc:  # noqa: BLE001
             elapsed = time.perf_counter() - (self._op_started_at or time.perf_counter())
             self._finish_timing("Compare 실패", elapsed, False)
@@ -290,11 +366,45 @@ class MainWindow(QMainWindow):
 
         elapsed = float(result.get("elapsed_sec", self._comparer.last_elapsed_sec))
         self._finish_timing("Compare", elapsed, True)
+        self._last_compare_result = result
 
         self.compare_list.clear()
         for row in self._comparer.to_list_rows(result):
             self.compare_list.addItem(row)
 
-        saved = result.get("saved_path", "")
-        self.statusBar().showMessage(f"비교 완료: {saved} ({elapsed:.2f}s)")
-        self.refresh_meta_list()
+        summary = result.get("summary", {})
+        self.statusBar().showMessage(
+            f"비교 완료 LeftOnly={summary.get('only_left', 0)} "
+            f"RightOnly={summary.get('only_right', 0)} ({elapsed:.2f}s) — CSV는 수동 저장"
+        )
+
+    def _on_save_compare_csv(self) -> None:
+        if not self._last_compare_result:
+            QMessageBox.information(self, "CSV 저장", "먼저 Compare를 실행하세요.")
+            return
+
+        left = self._last_compare_result.get("left", "left")
+        right = self._last_compare_result.get("right", "right")
+        default_name = f"fcmp_cmp_{left}_vs_{right}.csv"
+        default_path = str(self._data_dir / default_name)
+
+        out_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Compare 결과 CSV 저장",
+            default_path,
+            "CSV Files (*.csv)",
+        )
+        if not out_path:
+            return
+
+        try:
+            saved = self._comparer.save_csv(self._last_compare_result, out_path)
+        except OSError as exc:
+            self.dlt.error("MAIN", f"csv save failed: {exc}")
+            QMessageBox.critical(self, "저장 실패", str(exc))
+            return
+
+        self._last_compare_result["saved_path"] = str(saved)
+        self.dlt.info("MAIN", f"compare csv saved: {saved}")
+        self.statusBar().showMessage(f"CSV 저장 완료: {saved}")
+        QMessageBox.information(self, "CSV 저장", f"저장 완료\n{saved}")
