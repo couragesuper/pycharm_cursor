@@ -30,3 +30,7 @@
 2) FCMP_CompareMeta 두개의 메타데이터를 바탕으로 비교하는 로직
 3) 메타 생성 진행 콜백으로 (현재 폴더, 처리 파일 수)를 UI/Status에 전달
 
+## Git
+1) https://github.com/couragesuper/pycharm_cursor 과 연동
+2) Cursor 폴더 밑으로 
+3) 메타데이터나 dlt는 push하지 않는다. 
